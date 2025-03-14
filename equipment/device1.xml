@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<device>
+    <block id="1" 
+           Name="Тестовое устройство" 
+           IP="192.168.1.100" 
+           BoardCount="2" 
+           MtR="1" 
+           MtC="1" 
+           Description="Тестовое описание устройства" 
+           Label="TEST">
+        <board id="b1" 
+               Num="1" 
+               Name="Плата 1" 
+               PortCount="2" 
+               IntLinks="" 
+               Algoritms="">
+            <port id="p1" Num="1" Media="1" Signal="1"/>
+            <port id="p2" Num="2" Media="1" Signal="1"/>
+        </board>
+    </block>
+</device> 
