@@ -7,13 +7,17 @@
 #include <QJsonParseError>
 #include <QDebug>
 #include <QTimer>
+#include <QEventLoop>
+#include <QCoreApplication>
 
 // Инициализация статических констант
 const QString Client::DEFAULT_SERVER_ADDRESS = "localhost";
 const int Client::DEFAULT_SERVER_PORT;  // Уже инициализирован в заголовочном файле
 const int Client::RECONNECT_TIMEOUT_MS;  // Уже инициализирован в заголовочном файле
+const int Client::CONSOLE_TIMEOUT_MS;  // Уже инициализирован в заголовочном файле
 
-Client::Client(QWidget *parent) : QMainWindow(parent)
+Client::Client(bool consoleMode, QWidget *parent) : QMainWindow(parent), 
+    consoleOut(stdout), isConsoleMode(consoleMode), dataReceived(false)
 {
     serverAddress = DEFAULT_SERVER_ADDRESS;
     serverPort = DEFAULT_SERVER_PORT;
@@ -25,8 +29,9 @@ Client::Client(QWidget *parent) : QMainWindow(parent)
     connect(socket, &QTcpSocket::readyRead, this, &Client::handleReadyRead);
     connect(socket, &QTcpSocket::errorOccurred, this, &Client::handleError);
 
-    setupUi();
-    connectToServer();
+    if (!isConsoleMode) {
+        setupUi();
+    }
 }
 
 Client::~Client()
@@ -72,6 +77,57 @@ void Client::setServerPort(int port)
     }
 }
 
+bool Client::parseCommandLineArgs(const QCommandLineParser &parser)
+{
+    if (parser.isSet("address")) {
+        setServerAddress(parser.value("address"));
+    }
+    
+    if (parser.isSet("port")) {
+        bool ok;
+        int port = parser.value("port").toInt(&ok);
+        if (ok && port > 0 && port < 65536) {
+            setServerPort(port);
+        } else {
+            if (isConsoleMode) {
+                consoleOut << "Ошибка: Неверный порт. Должно быть число от 1 до 65535." << Qt::endl;
+            } else {
+                QMessageBox::warning(this, "Ошибка", "Неверный порт. Должно быть число от 1 до 65535.");
+            }
+            return false;
+        }
+    }
+    
+    return true;
+}
+
+int Client::runConsoleMode()
+{
+    consoleOut << "Запуск в консольном режиме" << Qt::endl;
+    consoleOut << "Подключение к " << serverAddress << ":" << serverPort << "..." << Qt::endl;
+    
+    connectToServer();
+    
+    // Ожидаем получения данных или таймаута
+    QTimer timer;
+    QEventLoop loop;
+    
+    // Соединяем сигналы с выходом из цикла событий
+    connect(&timer, &QTimer::timeout, &loop, &QEventLoop::quit);
+    connect(socket, &QTcpSocket::disconnected, &loop, &QEventLoop::quit);
+    connect(this, &Client::handleConsoleDataReceived, &loop, &QEventLoop::quit);
+    
+    timer.start(CONSOLE_TIMEOUT_MS);
+    loop.exec();
+    
+    if (!dataReceived) {
+        consoleOut << "Ошибка: Таймаут при ожидании данных от сервера." << Qt::endl;
+        return 1;
+    }
+    
+    return 0;
+}
+
 void Client::setupUi()
 {
     QWidget *centralWidget = new QWidget(this);
@@ -104,30 +160,48 @@ void Client::connectToServer()
         return; // Уже подключены
     }
     
-    updateConnectionStatus();
+    if (!isConsoleMode) {
+        updateConnectionStatus();
+    } else {
+        consoleOut << "Подключение к серверу..." << Qt::endl;
+    }
+    
     socket->connectToHost(serverAddress, serverPort);
 }
 
 void Client::handleConnected()
 {
-    updateConnectionStatus();
-    qDebug() << "Отправка запроса GET_DATA";
+    if (!isConsoleMode) {
+        updateConnectionStatus();
+    } else {
+        consoleOut << "Подключено к серверу " << serverAddress << ":" << serverPort << Qt::endl;
+        consoleOut << "Отправка запроса GET_DATA" << Qt::endl;
+    }
+    
     socket->write("GET_DATA");
 }
 
 void Client::handleDisconnected()
 {
-    updateConnectionStatus();
-    
-    // Попытка переподключения через заданный интервал
-    QTimer::singleShot(RECONNECT_TIMEOUT_MS, this, &Client::connectToServer);
+    if (!isConsoleMode) {
+        updateConnectionStatus();
+        // Попытка переподключения через заданный интервал
+        QTimer::singleShot(RECONNECT_TIMEOUT_MS, this, &Client::connectToServer);
+    } else {
+        consoleOut << "Отключено от сервера" << Qt::endl;
+    }
 }
 
 void Client::handleError(QAbstractSocket::SocketError error)
 {
     QString errorStr = "Ошибка подключения: " + socket->errorString();
-    statusLabel->setText(errorStr);
-    QMessageBox::critical(this, "Ошибка", errorStr);
+    
+    if (!isConsoleMode) {
+        statusLabel->setText(errorStr);
+        QMessageBox::critical(this, "Ошибка", errorStr);
+    } else {
+        consoleOut << errorStr << Qt::endl;
+    }
 }
 
 void Client::updateConnectionStatus()
@@ -142,12 +216,29 @@ void Client::handleReadyRead()
     QByteArray jsonData = socket->readAll();
     
     if (jsonData.isEmpty()) {
-        qDebug() << "Получены пустые данные";
+        if (isConsoleMode) {
+            consoleOut << "Получены пустые данные" << Qt::endl;
+        } else {
+            qDebug() << "Получены пустые данные";
+        }
         return;
     }
     
-    qDebug() << "Получены данные:" << jsonData;
-    processJsonData(jsonData);
+    if (!isConsoleMode) {
+        qDebug() << "Получены данные:" << jsonData;
+        processJsonData(jsonData);
+    } else {
+        consoleOut << "Получены данные от сервера" << Qt::endl;
+        printDataToConsole(jsonData);
+        dataReceived = true;
+        emit handleConsoleDataReceived();
+    }
+}
+
+void Client::handleConsoleDataReceived()
+{
+    // Этот слот вызывается, когда данные получены в консольном режиме
+    // Используется для выхода из цикла событий в runConsoleMode()
 }
 
 void Client::processJsonData(const QByteArray &jsonData)
@@ -185,5 +276,38 @@ void Client::processJsonData(const QByteArray &jsonData)
         }
     } else {
         qDebug() << "Полученные данные не являются массивом";
+    }
+}
+
+void Client::printDataToConsole(const QByteArray &jsonData)
+{
+    QJsonParseError parseError;
+    QJsonDocument doc = QJsonDocument::fromJson(jsonData, &parseError);
+    
+    if (parseError.error != QJsonParseError::NoError) {
+        consoleOut << "Ошибка разбора JSON: " << parseError.errorString() << Qt::endl;
+        return;
+    }
+    
+    if (doc.isArray()) {
+        QJsonArray array = doc.array();
+        
+        consoleOut << "Получено " << array.size() << " записей:" << Qt::endl;
+        consoleOut << "----------------------------------------------" << Qt::endl;
+        consoleOut << QString("%1 | %2 | %3").arg("IP", -15).arg("Имя", -20).arg("Описание") << Qt::endl;
+        consoleOut << "----------------------------------------------" << Qt::endl;
+        
+        for (const QJsonValue &value : array) {
+            QJsonObject obj = value.toObject();
+            QString ip = obj["ip"].toString();
+            QString name = obj["name"].toString();
+            QString description = obj["description"].toString();
+            
+            consoleOut << QString("%1 | %2 | %3").arg(ip, -15).arg(name, -20).arg(description) << Qt::endl;
+        }
+        
+        consoleOut << "----------------------------------------------" << Qt::endl;
+    } else {
+        consoleOut << "Полученные данные не являются массивом" << Qt::endl;
     }
 } 
